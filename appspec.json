@@ -4,35 +4,35 @@
     {
       "id": "file.name",
       "name": "File name",
-      "description": "Insert a file name for your shapefile folder(s) and files, without spaces. Defaults to `moveapps-shapefile`",
+      "description": "Insert a file name for your shapefile folder(s) and files, without spaces. If left empty, `moveapps-shapefile` is used.",
       "defaultValue": "moveapps-shapefile",
       "type": "STRING"
     },
     {
       "id": "pts",
       "name": "Points shapefile",
-      "description": "Select if you want to create a zipped set of shapefiles containing the points of the data set.",
+      "description": "Select if you want to create a zipped set of shapefiles containing the points (locations) of the data set.",
       "defaultValue": true,
       "type": "CHECKBOX"
     },
-	{
+    {
       "id": "seg",
       "name": "Line segments shapefile",
-      "description": "Select if you want to create a zipped set of shapefiles containing the line segements of the data set.",
+      "description": "Select if you want to create a zipped set of shapefiles containing the line segments between successive locations of the data set.",
       "defaultValue": false,
       "type": "CHECKBOX"
     },
-	{
+    {
       "id": "lins",
       "name": "Track lines shapefile",
-      "description": "Select if you want to create a zipped set of shapefiles containing the full lines per track of the data set.",
+      "description": "Select if you want to create a zipped set of shapefiles containing one line per track, including the track attributes.",
       "defaultValue": false,
       "type": "CHECKBOX"
-    },    
-	{
+    },
+    {
       "id": "gpkg",
       "name": "GeoPackage file(s)",
-      "description": "Select if you want additional *.gpkg files created for the selected shapefiles (points, segments, lines).",
+      "description": "Select if you want additional *.gpkg files created for the selected outputs (points, segments, lines). GeoPackages keep the original attribute names and full timestamps.",
       "defaultValue": false,
       "type": "CHECKBOX"
     }
@@ -50,9 +50,6 @@
       },
       {
         "name": "zip"
-      },
-      {
-        "name": "stringr"
       }
     ]
   },
@@ -70,14 +67,18 @@
     "shapefile",
     "shp",
     "dbf",
-	"gpkg",
-	"geopackage",
-	"write",
-	"GIS"
+    "gpkg",
+    "geopackage",
+    "write",
+    "GIS",
+    "export",
+    "lines",
+    "segments",
+    "points"
   ],
   "people": [
     {
-     "firstName": "Andrea",
+      "firstName": "Andrea",
       "middleInitials": null,
       "lastName": "Kölzsch",
       "email": "akoelzsch@ab.mpg.de",
@@ -89,22 +90,39 @@
       "affiliation": "Max-Planck-Institute of Animal Behavior",
       "affiliationRor": "https://ror.org/026stee22"
     },
-	{
+    {
       "firstName": "Clemens",
+      "middleInitials": null,
       "lastName": "Hahn",
       "email": "clemens@couchbits.com",
       "roles": [
         "author",
         "contributor"
       ],
-      "affiliation": "couchbits GmbH"
+      "orcid": null,
+      "affiliation": "couchbits GmbH",
+      "affiliationRor": null
     },
-	{
+    {
       "firstName": "Anne",
       "middleInitials": "K",
       "lastName": "Scharf",
       "email": "ascharf@ab.mpg.de",
-      "roles": ["author"],
+      "roles": [
+        "author"
+      ],
+      "orcid": null,
+      "affiliation": "Max-Planck-Institute of Animal Behavior",
+      "affiliationRor": "https://ror.org/026stee22"
+    },
+    {
+      "firstName": "Nafiseh",
+      "middleInitials": null,
+      "lastName": "Tavakol",
+      "email": "ntavakol@ab.mpg.de",
+      "roles": [
+        "contributor"
+      ],
       "orcid": null,
       "affiliation": "Max-Planck-Institute of Animal Behavior",
       "affiliationRor": "https://ror.org/026stee22"

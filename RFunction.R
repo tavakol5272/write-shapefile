@@ -1,151 +1,182 @@
-library('move2')
-library('sf')
-library('dplyr')
-library('zip')
-library('stringr')
+library("move2")
+library("sf")
+library("dplyr")
+library("zip")
 
-rFunction = function(data, pts=TRUE, seg=TRUE, lins=TRUE, gpkg=TRUE, file.name="moveapps-shapefile", ...) {
+## The parameter "data" is reserved for the data object passed on from the previous App.
+## Settings (ids as in appspec.json): file.name, pts, seg, lins, gpkg
+
+# ------------------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------------------
+
+# Drop all attribute columns that only contain NA (the geometry column is kept).
+drop_empty_cols <- function(x) {
+  x %>% dplyr::select(where(~ !all(is.na(.))))
+}
+
+# Convert a move2/sf object into a plain sf table that GDAL can write:
+# - removes the move2 class and its track-data/metadata attributes,
+# - drops additional (non-active) geometry columns,
+# - converts list columns to comma-separated text (GDAL cannot write them).
+to_plain_sf <- function(x) {
+  gcol <- attr(x, "sf_column")
+  geom <- sf::st_geometry(x)
+  cols <- setdiff(names(x), gcol)
+  out <- list()
+  for (n in cols) {
+    v <- x[[n]]
+    if (inherits(v, "sfc")) next
+    if (is.list(v)) {
+      v <- vapply(v, function(e) paste(as.character(unlist(e)), collapse = ","), character(1))
+      logger.info(paste0("Attribute '", n, "' is a list column and was converted to text for writing."))
+    }
+    out[[n]] <- v
+  }
+  df <- structure(out, class = "data.frame", row.names = .set_row_names(length(geom)))
+  sf::st_sf(df, geometry = geom)
+}
+
+# Shorten attribute names to max. 10 characters for the shapefile format.
+# Movebank attributes are renamed with the vocabulary file; other names longer
+# than 10 characters keep their first 10 non-vowel characters. Duplicates are
+# shortened to 8 characters and indexed. (Same rules as in v3.0.)
+shorten_names <- function(nms, vocab) {
+  vocab_name  <- tolower(make.names(vocab$name, allow_ = FALSE))
+  vocab_short <- make.names(vocab$shortname_mx10, allow_ = FALSE)
   
-  ## move all track associated attributes to the event table
-  data_allattrb <- mt_as_event_attribute(data, names(mt_track_data(data)))
-  ## drop all attributes that are all NA
-  data_allattrb <- data_allattrb %>% select(where(~ !(all(is.na(.)))))
+  nms <- tolower(make.names(nms, allow_ = FALSE))
+  novowel_max10 <- substring(gsub("[aeiou ]", "", nms), 1, 10)
   
-  # create folder for storing subfiles to then zip
-  dir.create(targetDirZipFile <- Sys.getenv(x = "APP_ARTIFACTS_DIR", "artefact-mock"))
-  dir.create(targetDirShapeFiles <- tempdir())
-  targetDirShapeFiles <- paste0(targetDirShapeFiles,"/",file.name)
-  logger.info(paste0("Storing shapefiles in tmp-dir ", targetDirShapeFiles))
-  
-  ## update attribute names to max 10 characters. use file from Sarah
-  shnames <- read.csv(getAuxiliaryFilePath("vocab"),header=TRUE) #adapted to USER_FILE: "MovebankVocab_ShapefileNamesF.csv"
-  shnames$name <- tolower(make.names(shnames$name,allow_=FALSE))
-  shnames$shortname_mx10 <- make.names(shnames$shortname_mx10,allow_=FALSE)
-  
-  nms <- names(data_allattrb)
-  nms <- tolower(make.names(nms,allow_=FALSE))
-  shortname_novoc<- apply(matrix(nms),1,function(x) stringr::str_replace_all(x, "[aeiou ]", ""))
-  shortname_novoc_max10 <- substring(shortname_novoc,1,10)
-  
-  for(i in seq(along=names(data_allattrb)))
-  {
-    if (nchar(nms[i]) > 10) 
-    {
-      if (nms[i] %in% shnames$name)
-      {
-        ix <- which(shnames$name==nms[i])
-        nms[i] <- shnames$shortname_mx10[ix[1]]
-      } else nms[i] <- shortname_novoc_max10[i]
+  for (i in seq_along(nms)) {
+    if (nchar(nms[i]) > 10) {
+      ix <- match(nms[i], vocab_name)
+      nms[i] <- if (!is.na(ix)) vocab_short[ix] else novowel_max10[i]
     }
   }
   
-  #if there are duplicates shorten and index
+  # if there are duplicates, shorten and index
   X <- 0
   L <- 0
-  while (any(duplicated(nms)) & (L+X)<100)
-  {
-    dpl <- which(duplicated(nms)) 
-    for (k in seq(along=dpl))
-    {
-      dd <- which(nms==nms[dpl[k]])
+  while (any(duplicated(nms)) & (L + X) < 100) {
+    dpl <- which(duplicated(nms))
+    for (k in seq_along(dpl)) {
+      dd <- which(nms == nms[dpl[k]])
       L <- length(dd)
-      nms[dd] <- paste0(substr(nms[dpl[k]],1,8),c(1:L+X))
-      X <- X+1
+      nms[dd] <- paste0(substr(nms[dpl[k]], 1, 8), c(1:L + X))
+      X <- X + 1
     }
   }
-  ix_trackid <- which(names(data_allattrb)==mt_track_id_column(data_allattrb))
-  mt_track_id(data_allattrb) <- nms[ix_trackid] #NEEDS MORE TESTNG, WHY DID THIS WORK BEFORE? CHECK HELP SITE EXAMPLE AGAIN
-  names(data_allattrb) <- nms
+  nms
+}
 
-  # fix matrix columns to numeric, this might not work with move2, but may also not cause problems
-  #for (j in seq(along=nms))
-  #{
-  #  if (class(data_allattrb[,nms[j]])[1]=="matrix")
-  #  {
-  #    data_allattrb[,nms[j]] <- as.numeric(data_allattrb[,nms[j]])
-  #    logger.info(paste("Your variable",nms[j],"had to be transferred to numeric."))
-  #  }
-  #}
+# Rename the attribute columns of a plain sf table using a name map
+# (named character vector: original name -> shapefile name).
+rename_for_shp <- function(x, name_map, vocab) {
+  gcol <- attr(x, "sf_column")
+  cols <- setdiff(names(x), gcol)
+  new <- unname(name_map[cols])
+  if (any(is.na(new))) new[is.na(new)] <- shorten_names(cols[is.na(new)], vocab)
+  names(x)[match(cols, names(x))] <- new
+  x
+}
+
+# Write a plain sf table as a zipped shapefile artefact (folder <file.name>/ inside the zip).
+write_zipped_shp <- function(x, shp_dir, file.name, zip_name) {
+  unlink(shp_dir, recursive = TRUE)
+  sf::st_write(x, shp_dir, layer = file.name, driver = "ESRI Shapefile", quiet = TRUE)
+  zipfile <- appArtifactPath(zip_name)
+  if (file.exists(zipfile)) unlink(zipfile)
+  zip::zip(zipfile = zipfile, files = shp_dir, mode = "cherry-pick")
+}
+
+# Write a plain sf table as a GeoPackage artefact.
+write_gpkg <- function(x, gpkg_name) {
+  f <- appArtifactPath(gpkg_name)
+  if (file.exists(f)) unlink(f)
+  sf::st_write(x, f, driver = "GPKG", quiet = TRUE)
+}
+
+# ------------------------------------------------------------------------------
+# Main App function
+# ------------------------------------------------------------------------------
+
+rFunction <- function(data, file.name = "moveapps-shapefile", pts = TRUE, seg = FALSE,
+                      lins = FALSE, gpkg = FALSE, ...) {
   
-  ## Save as a Shapefile -> Points
+  if (is.null(file.name) || is.na(file.name) || trimws(file.name) == "") {
+    file.name <- "moveapps-shapefile"
+    logger.info("No file name provided, using 'moveapps-shapefile'.")
+  }
+  file.name <- trimws(file.name)
   
-  if (pts==TRUE)
-  {
+  if (!(pts | seg | lins)) {
+    logger.warn(paste("No output type (points, line segments, track lines) was selected.",
+                      "No shapefiles", if (gpkg) "or GeoPackages", "are created.",
+                      "The input data are returned unchanged."))
+    return(data)
+  }
+  
+  ## all track attributes are added to the event table, all-NA attributes are dropped
+  pts_m2 <- mt_as_event_attribute(data, names(mt_track_data(data)))
+  pts_m2 <- drop_empty_cols(pts_m2)
+  pts_sf <- to_plain_sf(pts_m2)
+  
+  ## shapefile attribute names (max. 10 characters), one map for all outputs
+  vocab <- read.csv(getAuxiliaryFilePath("vocab"), header = TRUE)
+  attr_names <- setdiff(names(pts_sf), attr(pts_sf, "sf_column"))
+  name_map <- setNames(shorten_names(attr_names, vocab), attr_names)
+  
+  shp_dir <- file.path(tempdir(), file.name)
+  logger.info(paste0("Storing shapefiles in tmp-dir ", shp_dir))
+  
+  ## points
+  if (pts) {
     logger.info("You have requested a shapefile with all data points. They are zipped into a file called data_points_shps.zip.")
-    sf::st_write(data_allattrb, targetDirShapeFiles, layer=file.name, driver="ESRI Shapefile", delete_layer = TRUE)
-    zip::zip(
-      zipfile=paste0(targetDirZipFile,"/data_points_shps.zip"),
-      files=  targetDirShapeFiles,
-      #root = targetDirZipFile,
-      mode = "cherry-pick"
-    )
-    if (gpkg==TRUE)
-    {
+    write_zipped_shp(rename_for_shp(pts_sf, name_map, vocab), shp_dir, file.name, "data_points_shps.zip")
+    if (gpkg) {
       logger.info("You have requested a gpkg file for the points of the track(s).")
-      data_allattrb2 <- mt_as_event_attribute(data, names(mt_track_data(data)))
-      data_allattrb2 <- data_allattrb2 %>% select(where(~ !(all(is.na(.)))))
-      sf::st_write(data_allattrb2, dsn=paste0(targetDirZipFile,"/",file.name,"_points.gpkg"), driver="GPKG", delete_layer = TRUE) # for overwriting
+      write_gpkg(pts_sf, paste0(file.name, "_points.gpkg"))
     }
   }
-
-  ## making lines out of a move2 obj
-  ## segments
-  # data_segments <- mt_segments(data) # returns lines between consecutive points, ie segments. Contains no attrib except locations, traks cannot be identified. So alternative is:
   
-  if (seg==TRUE)
-  {
+  ## segments: line between each pair of successive locations, carrying the
+  ## attributes of the first location; the last location of each track has no segment
+  if (seg) {
     logger.info("You have requested a shapefile with all track segments. They are zipped into a file called data_segments_shps.zip.")
-    data_allattrb_seg <- data_allattrb
-    data_allattrb_seg$segments <- mt_segments(data_allattrb_seg)
-    data_allattrb_seg <-data_allattrb_seg %>%  dplyr::filter(st_geometry_type(data_allattrb_seg$segments) == "LINESTRING") # as the last one is a point, this has to be removed or it cannot be saved with st_write()
-    st_geometry(data_allattrb_seg) <- data_allattrb_seg$segments ## making the segments the geometry of the object
-    
-    sf::st_write(data_allattrb_seg, targetDirShapeFiles, layer=file.name, driver="ESRI Shapefile", delete_layer = TRUE)
-    zip::zip(
-      zipfile=paste0(targetDirZipFile,"/data_segments_shps.zip"),
-      files=  targetDirShapeFiles,
-      #root = targetDirZipFile,
-      mode = "cherry-pick"
-    )
-    if (gpkg==TRUE)
-    {
-      logger.info("You have requested a gpkg file for the segments of the track(s).")
-      data_allattrb2 <- mt_as_event_attribute(data, names(mt_track_data(data)))
-      data_allattrb2 <- data_allattrb2 %>% select(where(~ !(all(is.na(.)))))
-      
-      data_allattrb2_seg <- data_allattrb2
-      data_allattrb2_seg$segments <- mt_segments(data_allattrb2_seg)
-      data_allattrb2_seg <-data_allattrb2_seg %>%  dplyr::filter(st_geometry_type(data_allattrb2_seg$segments) == "LINESTRING") # as the last one is a point, this has to be removed or it cannot be saved with st_write()
-      st_geometry(data_allattrb2_seg) <- data_allattrb2_seg$segments ## making the segments the geometry of the object
-      
-      sf::st_write(data_allattrb2_seg, dsn=paste0(targetDirZipFile,"/",file.name,"_segments.gpkg"), driver="GPKG", delete_layer = TRUE) # for overwriting
+    segs <- mt_segments(pts_m2)
+    seg_sf <- pts_sf
+    sf::st_geometry(seg_sf) <- segs
+    seg_sf <- seg_sf[sf::st_geometry_type(segs) == "LINESTRING", ]
+    if (nrow(seg_sf) == 0) {
+      logger.warn("No track has more than one location, so no line segments can be created. Segment files are not written.")
+    } else {
+      write_zipped_shp(rename_for_shp(seg_sf, name_map, vocab), shp_dir, file.name, "data_segments_shps.zip")
+      if (gpkg) {
+        logger.info("You have requested a gpkg file for the segments of the track(s).")
+        write_gpkg(seg_sf, paste0(file.name, "_segments.gpkg"))
+      }
     }
   }
-
-  ## one line per track
-  if (lins==TRUE)
-  {
+  
+  ## track lines: one line per track, with all (not all-NA) track attributes
+  if (lins) {
     logger.info("You have requested a shapefile with all tracks as lines. They are zipped into a file called data_lines_shps.zip.")
-    data_allattrb_lines <- mt_track_lines(data_allattrb) # returns one line per track, track attrb are kept
-    
-    sf::st_write(data_allattrb_lines, targetDirShapeFiles, layer=file.name, driver="ESRI Shapefile", delete_layer = TRUE)
-    zip::zip(
-      zipfile=paste0(targetDirZipFile,"/data_lines_shps.zip"),
-      files=  targetDirShapeFiles,
-      #root = targetDirZipFile,
-      mode = "cherry-pick"
-    )
-    if (gpkg==TRUE)
-    {
+    n_loc <- table(as.character(mt_track_id(data)))
+    if (any(n_loc < 2)) {
+      logger.warn(paste("The following track(s) have only one location and result in an invalid line:",
+                        paste(names(n_loc)[n_loc < 2], collapse = ", ")))
+    }
+    lins_sf <- drop_empty_cols(to_plain_sf(mt_track_lines(data)))
+    write_zipped_shp(rename_for_shp(lins_sf, name_map, vocab), shp_dir, file.name, "data_lines_shps.zip")
+    if (gpkg) {
       logger.info("You have requested a gpkg file for the line(s) of the track(s).")
-      data_allattrb2 <- mt_as_event_attribute(data, names(mt_track_data(data)))
-      data_allattrb2 <- data_allattrb2 %>% select(where(~ !(all(is.na(.)))))
-      
-      data_allattrb2_lines <- mt_track_lines(data_allattrb2) # returns one line per track, track attrb are kept
-      
-      sf::st_write(data_allattrb2_lines, dsn=paste0(targetDirZipFile,"/",file.name,"_lines.gpkg"), driver="GPKG", delete_layer = TRUE) # for overwriting
+      write_gpkg(lins_sf, paste0(file.name, "_lines.gpkg"))
     }
   }
-
+  
+  unlink(shp_dir, recursive = TRUE)
+  
+  ## the input data are passed on unchanged
   return(data)
 }
